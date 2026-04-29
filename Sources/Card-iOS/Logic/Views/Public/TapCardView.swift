@@ -172,8 +172,9 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// - Parameter completion: Invoked on the main thread once the request finishes (success or failure),
     ///   so callers can sequence work that depends on `detectedIP` being populated.
     internal func getIP(completion: (() -> Void)? = nil) {
-        let url = URL(string: "https://geolocation-db.com/json/")!
-        ipFetchTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        var geoRequest = URLRequest(url: URL(string: "https://geolocation-db.com/json/")!)
+        geoRequest.timeoutInterval = 10
+        ipFetchTask = URLSession.shared.dataTask(with: geoRequest) { [weak self] data, _, _ in
             guard let self = self else { return }
             defer {
                 self.ipFetched = true
