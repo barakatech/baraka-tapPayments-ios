@@ -38,6 +38,13 @@ extension TapCardView:WKNavigationDelegate {
             break
         case _ where url.absoluteString.contains("onBinIdentification"):
             delegate?.onBinIdentification?(data: tap_extractDataFromUrl(url.absoluteURL))
+            // The web SDK only emits `onInvalidInput(false)` on a validity *transition*. When we
+            // prefill a complete card, validity goes from invalid to valid on the very first
+            // fillCardInputs and never transitions again on subsequent loads against a warm
+            // WebView, so the host's `onInvalidInput`-based trigger never fires. Tokenise
+            // directly here — by the time `onBinIdentification` arrives, the card is fully
+            // accepted by the web SDK and ready to tokenise.
+            generateTapToken()
             break
         case _ where url.absoluteString.contains("onInvalidInput"):
             delegate?.onInvalidInput?(invalid: Bool(tap_extractDataFromUrl(url.absoluteURL).lowercased()) ?? false)
