@@ -65,6 +65,9 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// The Tap web SDK occasionally swallows `onReady` on a cold WebView; reloading once shortly
     /// after `load()` recovers without any user-facing failure.
     internal var pendingReload: DispatchWorkItem?
+    /// Short instance id used in debug logs to distinguish successive TapCardView lifetimes
+    /// (e.g. when the host recreates the form after a back + re-scan).
+    internal let debugId: String = String(UUID().uuidString.prefix(4))
     /// The headers encryption key
     internal var headersEncryptionPublicKey:String {
         if getCardKey().contains("test") {
@@ -77,14 +80,17 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     override init(frame: CGRect) {
         super.init(frame: frame)
         commonInit()
+        print("[TapCardView \(debugId)] init(frame:)")
     }
-    
+
     required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
         commonInit()
+        print("[TapCardView \(debugId)] init(coder:)")
     }
 
     deinit {
+        print("[TapCardView \(debugId)] deinit — ipFetched=\(ipFetched) detectedIP='\(detectedIP)' pendingReload=\(pendingReload != nil)")
         ipFetchTask?.cancel()
         pendingReload?.cancel()
     }
@@ -101,6 +107,7 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// Used to open a url inside the Tap card web sdk.
     /// - Parameter url: The url needed to load.
     private func openUrl(url: URL?) {
+        print("[TapCardView \(debugId)] openUrl called")
         // Store it for further usages
         currentlyLoadedCardConfigurations = url
         var request = URLRequest(url: url!)
@@ -109,7 +116,9 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
         // fire over the new load.
         pendingReload?.cancel()
         let reload = DispatchWorkItem { [weak self] in
-            self?.webView?.reload()
+            guard let self = self else { return }
+            print("[TapCardView \(self.debugId)] pendingReload FIRED — calling webView.reload()")
+            self.webView?.reload()
         }
         pendingReload = reload
         DispatchQueue.main.async {
@@ -194,6 +203,7 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// existing request settles. This avoids racing two parallel `URLSessionDataTask`s when
     /// `commonInit()` and `initTapCardSDK()` are called back-to-back.
     internal func getIP(completion: (() -> Void)? = nil) {
+        print("[TapCardView \(debugId)] getIP called — ipFetched=\(ipFetched) inFlight=\(ipFetchTask != nil) hasCompletion=\(completion != nil)")
         if ipFetched {
             DispatchQueue.main.async { completion?() }
             return
@@ -202,22 +212,33 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
             ipPendingCompletions.append(completion)
         }
         // Already fetching — the in-flight task will drain `ipPendingCompletions` for us.
-        guard ipFetchTask == nil else { return }
+        guard ipFetchTask == nil else {
+            print("[TapCardView \(debugId)] getIP attaching to in-flight task (queue size now \(ipPendingCompletions.count))")
+            return
+        }
 
         var geoRequest = URLRequest(url: URL(string: "https://geolocation-db.com/json/")!)
         geoRequest.timeoutInterval = 10
-        ipFetchTask = URLSession.shared.dataTask(with: geoRequest) { [weak self] data, _, _ in
+        print("[TapCardView \(debugId)] getIP starting new request to geolocation-db.com")
+        ipFetchTask = URLSession.shared.dataTask(with: geoRequest) { [weak self] data, response, error in
             guard let self = self else { return }
+            let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let bodyLen = data?.count ?? -1
+            let errDesc = error?.localizedDescription ?? "nil"
             defer {
                 self.ipFetched = true
                 self.ipFetchTask = nil
                 let pending = self.ipPendingCompletions
                 self.ipPendingCompletions.removeAll()
+                print("[TapCardView \(self.debugId)] getIP finished — detectedIP='\(self.detectedIP)' httpStatus=\(httpStatus) bodyLen=\(bodyLen) error=\(errDesc) pendingCount=\(pending.count)")
                 DispatchQueue.main.async { pending.forEach { $0() } }
             }
             guard let data = data,
                   let jsonIP = try? JSONSerialization.jsonObject(with: data, options: .allowFragments) as? [String: Any],
-                  let ipString = jsonIP["IPv4"] as? String else { return }
+                  let ipString = jsonIP["IPv4"] as? String else {
+                print("[TapCardView \(self.debugId)] getIP could not parse IPv4 from body")
+                return
+            }
             self.detectedIP = ipString
         }
         ipFetchTask?.resume()
@@ -257,6 +278,7 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// Will do needed logic post getting a message from the web sdk that it is ready to be displayd
     internal func handleOnReady() {
         DispatchQueue.main.async {
+            print("[TapCardView \(self.debugId)] handleOnReady — detectedIP='\(self.detectedIP)' ipFetched=\(self.ipFetched) pendingReload=\(self.pendingReload != nil) cardNumberLen=\(self.cardNumber.count)")
             self.pendingReload?.cancel()
             self.pendingReload = nil
             self.delegate?.onReady?()
@@ -267,10 +289,14 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
             // race and the prefill path never emits `onInvalidInput(false)` on the very
             // first attempt, leaving the host stuck waiting for tokenisation.
             if !self.detectedIP.isEmpty {
-                self.webView?.evaluateJavaScript("window.setIP('\(self.detectedIP)')") { [weak self] _, _ in
-                    self?.prefillCardData()
+                print("[TapCardView \(self.debugId)] handleOnReady — branch=setIP+prefill")
+                self.webView?.evaluateJavaScript("window.setIP('\(self.detectedIP)')") { [weak self] _, error in
+                    guard let self = self else { return }
+                    print("[TapCardView \(self.debugId)] setIP completion — error=\(error?.localizedDescription ?? "nil")")
+                    self.prefillCardData()
                 }
             } else {
+                print("[TapCardView \(self.debugId)] handleOnReady — branch=prefillOnly (NO setIP, IP empty)")
                 self.prefillCardData()
             }
         }
@@ -278,14 +304,20 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     
     /// Will check if card number and expiry are passed by merchant, will ask the web sdk to fill them in
     internal func prefillCardData() {
+        print("[TapCardView \(debugId)] prefillCardData called — cardNumberLen=\(cardNumber.count) holderLen=\(cardHolderName.count)")
         guard cardNumber.count > 9 else {
+            print("[TapCardView \(debugId)] prefillCardData SKIPPED — cardNumber too short")
             cardNumber = ""
             cardExpiry = ""
             cardCVV = ""
             cardHolderName = ""
             return
         }
-        webView?.evaluateJavaScript("window.fillCardInputs({cardNumber: '\(cardNumber)',expiryDate: '\(cardExpiry)',cvv: '\(cardCVV)',cardHolderName: '\(cardHolderName)'})")
+        print("[TapCardView \(debugId)] prefillCardData calling fillCardInputs JS")
+        webView?.evaluateJavaScript("window.fillCardInputs({cardNumber: '\(cardNumber)',expiryDate: '\(cardExpiry)',cvv: '\(cardCVV)',cardHolderName: '\(cardHolderName)'})") { [weak self] _, error in
+            guard let self = self else { return }
+            print("[TapCardView \(self.debugId)] fillCardInputs completion — error=\(error?.localizedDescription ?? "nil")")
+        }
         cardNumber = ""
         cardExpiry = ""
         cardCVV = ""
@@ -348,7 +380,7 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     ///  - Parameter delegate:A protocol that allows integrators to get notified from events fired from Tap card sdk
     ///  - Parameter presentScannerIn: We will need a reference to the controller that we can present from the card scanner feature
     @objc public func initTapCardSDK(configDict: [String : Any], delegate: TapCardViewDelegate? = nil, presentScannerIn:UIViewController? = nil, cardNumber:String = "", cardExpiry:String = "", cardCVV:String = "", cardHolderName:String = "") {
-        
+        print("[TapCardView \(debugId)] initTapCardSDK called — ipFetched=\(ipFetched) detectedIP='\(detectedIP)' cardNumberLen=\(cardNumber.count)")
         self.delegate = delegate
         self.presentScannerIn = presentScannerIn ?? self.parentViewController
         // Remove any non numerical charachters for passed card number and date
@@ -370,6 +402,7 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
         // not responded yet). Mirrors the Android SDK which awaits getDeviceLocation().
         let proceed = { [weak self] in
             guard let self = self else { return }
+            print("[TapCardView \(self.debugId)] proceed (post-getIP) — detectedIP='\(self.detectedIP)' ipFetched=\(self.ipFetched)")
             // Then we need to load base url and encryption keys from cdn
             // We will first need to try to load the latest base url from the CDN to make sure our backend doesn't want us to look somewhere else
             if let url = URL(string: "https://tap-sdks.b-cdn.net/mobile/card/1.0.3/base_url.json") {
