@@ -54,6 +54,10 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     internal var currentlyLoadedCardConfigurations:URL?
     /// holds the initial width
     internal var initialWidth:CGFloat = 0
+    /// Reference to the in-flight geolocation request, kept so we can cancel on deinit
+    internal var ipFetchTask: URLSessionDataTask?
+    /// Whether the geolocation request has completed (success or failure)
+    internal var ipFetched: Bool = false
     /// The headers encryption key
     internal var headersEncryptionPublicKey:String {
         if getCardKey().contains("test") {
@@ -71,6 +75,10 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
         commonInit()
+    }
+
+    deinit {
+        ipFetchTask?.cancel()
     }
     
     //MARK: - Private methods
@@ -160,18 +168,24 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     }
     
     
-    /// Fetches the IP of the device
-    internal func getIP() {
-        let url = URL(string: "https://geolocation-db.com/json/")!
-        let task = URLSession.shared.dataTask(with: url) {data, response, error in
+    /// Fetches the IP of the device.
+    /// - Parameter completion: Invoked on the main thread once the request finishes (success or failure),
+    ///   so callers can sequence work that depends on `detectedIP` being populated.
+    internal func getIP(completion: (() -> Void)? = nil) {
+        var geoRequest = URLRequest(url: URL(string: "https://geolocation-db.com/json/")!)
+        geoRequest.timeoutInterval = 10
+        ipFetchTask = URLSession.shared.dataTask(with: geoRequest) { [weak self] data, _, _ in
+            guard let self = self else { return }
+            defer {
+                self.ipFetched = true
+                DispatchQueue.main.async { completion?() }
+            }
             guard let data = data,
-                  error == nil,
-                  let jsonIP:[String:Any] = try? JSONSerialization.jsonObject(with: data, options: .allowFragments) as? [String : Any],
-                  let ipString:String = jsonIP["IPv4"] as? String else { return }
-            
+                  let jsonIP = try? JSONSerialization.jsonObject(with: data, options: .allowFragments) as? [String: Any],
+                  let ipString = jsonIP["IPv4"] as? String else { return }
             self.detectedIP = ipString
         }
-        task.resume()
+        ipFetchTask?.resume()
     }
     
     /// Auto adjusts the height of the card view
@@ -207,11 +221,15 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     
     /// Will do needed logic post getting a message from the web sdk that it is ready to be displayd
     internal func handleOnReady() {
-        // Give a moment for the iFrame to be fully rendered
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(500)) {
+        DispatchQueue.main.async {
             self.delegate?.onReady?()
+            // IP must be set before card inputs are filled, otherwise the JS-side
+            // BIN identification request fires without IP context. Skip when empty
+            // to avoid polluting the JS state (mirrors the Android SDK behaviour).
+            if !self.detectedIP.isEmpty {
+                self.passIP()
+            }
             self.prefillCardData()
-            self.passIP()
         }
     }
     
@@ -308,20 +326,32 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
         // We will have to force NFC to false in iOS
         self.update(dictionary: &updatedConfigurations, at: ["features","alternativeCardInputs","cardNFC"], with: false)
         
-        // Then we need to load base url and encryption keys from cdn
-        // We will first need to try to load the latest base url from the CDN to make sure our backend doesn't want us to look somewhere else
-        if let url = URL(string: "https://tap-sdks.b-cdn.net/mobile/card/1.0.3/base_url.json") {
-            var cdnRequest = URLRequest(url: url)
-            cdnRequest.timeoutInterval = 2
-            cdnRequest.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            URLSession.shared.dataTask(with: cdnRequest) { data, response, error in
-                self.setLoadedDataFromCDN(data: data)
-                // we need to update the intent with the sdk info
+        // Wait for the geolocation request to settle before loading the iframe.
+        // Without this, the BIN identification call fires with an empty IP on the
+        // very first tokenisation attempt (race condition: geolocation-db.com has
+        // not responded yet). Mirrors the Android SDK which awaits getDeviceLocation().
+        let proceed = { [weak self] in
+            guard let self = self else { return }
+            // Then we need to load base url and encryption keys from cdn
+            // We will first need to try to load the latest base url from the CDN to make sure our backend doesn't want us to look somewhere else
+            if let url = URL(string: "https://tap-sdks.b-cdn.net/mobile/card/1.0.3/base_url.json") {
+                var cdnRequest = URLRequest(url: url)
+                cdnRequest.timeoutInterval = 2
+                cdnRequest.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                URLSession.shared.dataTask(with: cdnRequest) { [weak self] data, _, _ in
+                    guard let self = self else { return }
+                    self.setLoadedDataFromCDN(data: data)
+                    self.postLoadingFromCDN(configDict: updatedConfigurations, delegate: delegate)
+                }.resume()
+            } else {
                 self.postLoadingFromCDN(configDict: updatedConfigurations, delegate: delegate)
-              }.resume()
-        }else{
-            // Use the default embedded values as a fallback of all we need to update the intent with the sdk info
-            postLoadingFromCDN(configDict: updatedConfigurations, delegate: delegate)
+            }
+        }
+
+        if ipFetched {
+            proceed()
+        } else {
+            getIP { proceed() }
         }
     }
     
