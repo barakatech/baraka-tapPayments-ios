@@ -61,12 +61,6 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// Pending completions waiting for the in-flight geolocation request to settle.
     /// Lets concurrent callers attach to the existing request instead of issuing a parallel one.
     internal var ipPendingCompletions: [() -> Void] = []
-    /// Tracks whether the web SDK signalled `onReady` for the current load. Reset on each new load.
-    internal var didReceiveOnReady: Bool = false
-    /// Watchdog scheduled after each load. If `onReady` does not arrive in time we reload once.
-    internal var onReadyWatchdog: DispatchWorkItem?
-    /// Guards against an infinite reload loop when the web SDK never signals `onReady`.
-    internal var didRetryAfterWatchdog: Bool = false
     /// The headers encryption key
     internal var headersEncryptionPublicKey:String {
         if getCardKey().contains("test") {
@@ -88,7 +82,6 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
 
     deinit {
         ipFetchTask?.cancel()
-        onReadyWatchdog?.cancel()
     }
     
     //MARK: - Private methods
@@ -105,48 +98,19 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     private func openUrl(url: URL?) {
         // Store it for further usages
         currentlyLoadedCardConfigurations = url
-        // instruct the web view to load the needed url. The wrapper endpoint redirects internally
-        // to `index.html`; we ignore caches so the redirect chain is identical on the very first
-        // attempt and on subsequent ones (otherwise the first attempt occasionally never emits
-        // `onReady`, leaving the host UI stuck on its loader).
+        // The wrapper endpoint redirects internally to `index.html`. We ignore caches so the
+        // redirect chain is identical on the very first attempt and on subsequent ones
+        // (otherwise WKWebView's cached redirect could behave differently between cold and
+        // warm loads, which historically left the host UI stuck on its loader).
         var request = URLRequest(url: url!)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue(TapApplicationPlistInfo.shared.bundleIdentifier ?? "", forHTTPHeaderField: "referer")
-        // Reset the readiness state for this new load and arm a watchdog so we can recover if
-        // the web SDK never reports back.
-        didReceiveOnReady = false
-        scheduleOnReadyWatchdog()
         DispatchQueue.main.async {
             self.webView?.navigationDelegate = self
             self.webView?.load(request)
         }
     }
 
-    /// Arms a watchdog that triggers a single reload if `onReady` is not reported within the
-    /// expected window. Symptom we are guarding against: the wrapper page redirects to
-    /// `index.html` but the JS bridge never fires `tapcardwebsdk://onReady`, leaving the host
-    /// app in an infinite loading state.
-    private func scheduleOnReadyWatchdog() {
-        onReadyWatchdog?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self = self, !self.didReceiveOnReady else { return }
-            guard !self.didRetryAfterWatchdog,
-                  let url = self.currentlyLoadedCardConfigurations else {
-                // Already retried once — surface the failure rather than reloading forever.
-                self.delegate?.onError?(data: "{\"error\":\"Tap card SDK did not signal onReady in time.\"}")
-                return
-            }
-            self.didRetryAfterWatchdog = true
-            var retry = URLRequest(url: url)
-            retry.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            retry.setValue(TapApplicationPlistInfo.shared.bundleIdentifier ?? "", forHTTPHeaderField: "referer")
-            self.webView?.load(retry)
-            self.scheduleOnReadyWatchdog()
-        }
-        onReadyWatchdog = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
-    }
-    
     /// used to setup the constraint of the Tap card sdk view
     private func setupWebView() {
         // Creates needed configuration for the web view
@@ -282,9 +246,6 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// Will do needed logic post getting a message from the web sdk that it is ready to be displayd
     internal func handleOnReady() {
         DispatchQueue.main.async {
-            self.didReceiveOnReady = true
-            self.onReadyWatchdog?.cancel()
-            self.onReadyWatchdog = nil
             self.delegate?.onReady?()
             // IP must be set before card inputs are filled, otherwise the JS-side
             // BIN identification request fires without IP context. We chain through
