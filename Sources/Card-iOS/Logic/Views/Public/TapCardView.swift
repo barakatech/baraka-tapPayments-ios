@@ -61,6 +61,10 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// Pending completions waiting for the in-flight geolocation request to settle.
     /// Lets concurrent callers attach to the existing request instead of issuing a parallel one.
     internal var ipPendingCompletions: [() -> Void] = []
+    /// Pending one-shot reload scheduled for the current load, cancelled when `onReady` arrives.
+    /// The Tap web SDK occasionally swallows `onReady` on a cold WebView; reloading once shortly
+    /// after `load()` recovers without any user-facing failure.
+    internal var pendingReload: DispatchWorkItem?
     /// The headers encryption key
     internal var headersEncryptionPublicKey:String {
         if getCardKey().contains("test") {
@@ -82,6 +86,7 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
 
     deinit {
         ipFetchTask?.cancel()
+        pendingReload?.cancel()
     }
     
     //MARK: - Private methods
@@ -100,10 +105,21 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
         currentlyLoadedCardConfigurations = url
         var request = URLRequest(url: url!)
         request.setValue(TapApplicationPlistInfo.shared.bundleIdentifier ?? "", forHTTPHeaderField: "referer")
+        // Cancel any reload still pending from a previous openUrl call so a stale timer can't
+        // fire over the new load.
+        pendingReload?.cancel()
+        let reload = DispatchWorkItem { [weak self] in
+            self?.webView?.reload()
+        }
+        pendingReload = reload
         DispatchQueue.main.async {
             self.webView?.navigationDelegate = self
             self.webView?.load(request)
         }
+        // Empirically the Tap web SDK fails to emit `onReady` on a cold WebView load. Schedule a
+        // single silent reload after 2s; `handleOnReady` cancels this if the SDK does report back
+        // in time. No error is ever surfaced — at worst the user sees a brief extra spinner.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: reload)
     }
 
     /// used to setup the constraint of the Tap card sdk view
@@ -241,6 +257,8 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     /// Will do needed logic post getting a message from the web sdk that it is ready to be displayd
     internal func handleOnReady() {
         DispatchQueue.main.async {
+            self.pendingReload?.cancel()
+            self.pendingReload = nil
             self.delegate?.onReady?()
             // IP must be set before card inputs are filled, otherwise the JS-side
             // BIN identification request fires without IP context. We chain through
