@@ -98,12 +98,7 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
     private func openUrl(url: URL?) {
         // Store it for further usages
         currentlyLoadedCardConfigurations = url
-        // The wrapper endpoint redirects internally to `index.html`. We ignore caches so the
-        // redirect chain is identical on the very first attempt and on subsequent ones
-        // (otherwise WKWebView's cached redirect could behave differently between cold and
-        // warm loads, which historically left the host UI stuck on its loader).
         var request = URLRequest(url: url!)
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue(TapApplicationPlistInfo.shared.bundleIdentifier ?? "", forHTTPHeaderField: "referer")
         DispatchQueue.main.async {
             self.webView?.navigationDelegate = self
