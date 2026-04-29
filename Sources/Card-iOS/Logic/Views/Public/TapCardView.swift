@@ -287,12 +287,18 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
             self.onReadyWatchdog = nil
             self.delegate?.onReady?()
             // IP must be set before card inputs are filled, otherwise the JS-side
-            // BIN identification request fires without IP context. Skip when empty
-            // to avoid polluting the JS state (mirrors the Android SDK behaviour).
+            // BIN identification request fires without IP context. We chain through
+            // `evaluateJavaScript`'s completion handler to guarantee ordering on the
+            // JS side — without this, `window.setIP(...)` and `window.fillCardInputs(...)`
+            // race and the prefill path never emits `onInvalidInput(false)` on the very
+            // first attempt, leaving the host stuck waiting for tokenisation.
             if !self.detectedIP.isEmpty {
-                self.passIP()
+                self.webView?.evaluateJavaScript("window.setIP('\(self.detectedIP)')") { [weak self] _, _ in
+                    self?.prefillCardData()
+                }
+            } else {
+                self.prefillCardData()
             }
-            self.prefillCardData()
         }
     }
     
@@ -310,11 +316,6 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
         cardExpiry = ""
         cardCVV = ""
         cardHolderName = ""
-    }
-    
-    /// Will pass the detected IP to the card web sdk
-    internal func passIP() {
-        webView?.evaluateJavaScript("window.setIP('\(detectedIP)')")
     }
     
     /// Tells the web sdk the process is finished with the data from backend
