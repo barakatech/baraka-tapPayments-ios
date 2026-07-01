@@ -440,6 +440,27 @@ SZhWp4Mnd6wjVgXAsQIDAQAB
         endEditing(true)
         webView?.evaluateJavaScript("window.generateTapToken()")
     }
+
+    /// Fills the web card inputs on demand with the passed card data, without
+    /// re-initialising the SDK or reloading the web view.
+    ///
+    /// Hosts that collect the card fields in their own UI (e.g. the Flutter
+    /// wrapper) can call this on an already-ready instance right before
+    /// `generateTapToken()`, instead of re-creating the view to feed values
+    /// through `initTapCardSDK`. This mirrors the Android `fillFields` path and
+    /// lets the host keep a single, stable SDK instance for the whole flow.
+    @objc public func fillCardData(cardNumber: String, cardExpiry: String, cardCVV: String, cardHolderName: String) {
+        // Sanitise exactly like `initTapCardSDK` so the values reaching the web
+        // SDK are consistent regardless of the entry point.
+        self.cardNumber = cardNumber.tap_byRemovingAllCharactersExcept("0123456789")
+        self.cardExpiry = cardExpiry.tap_byRemovingAllCharactersExcept("0123456789/")
+        self.cardCVV = cardCVV.tap_byRemovingAllCharactersExcept("0123456789")
+        self.cardHolderName = cardHolderName
+        // `prefillCardData` injects the stored fields via `window.fillCardInputs`
+        // and then clears them. The IP is already set from the initial onReady,
+        // so we do not need to re-run the setIP chaining here.
+        prefillCardData()
+    }
     
     private func update(dictionary dict: inout [String: Any], at keys: [String], with value: Any) {
 
