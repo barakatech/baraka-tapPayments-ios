@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'TapPayments-Card-iOS'
-  s.version          = '1.0.12'
+  s.version          = '1.0.13'
   s.summary          = 'From the shelf card processing library provided by Tap Payments'
   s.homepage         = 'https://github.com/barakatech/baraka-tapPayments-ios'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
